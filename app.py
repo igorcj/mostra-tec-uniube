@@ -28,10 +28,7 @@ if not st.session_state.logado:
         
     if botao_login:
         try:
-            # Busca os usuários direto da aba 'Usuarios'
             df_usuarios = conn.read(worksheet="Usuarios", ttl=0)
-            
-            # Valida se o usuário e senha existem combinados
             usuario_valido = df_usuarios[(df_usuarios['usuario'] == user_input) & (df_usuarios['senha'] == str(pass_input))]
             
             if not usuario_valido.empty:
@@ -46,7 +43,7 @@ if not st.session_state.logado:
 
 # --- SISTEMA LOGADO ---
 else:
-    # Barra lateral para Logout e Boas-vindas
+    # Barra lateral para Logout
     st.sidebar.title(f"👤 Olá, {st.session_state.usuario}!")
     st.sidebar.write(f"Perfil: **{st.session_state.perfil.upper()}**")
     if st.sidebar.button("Sair / Logout"):
@@ -55,38 +52,43 @@ else:
         st.session_state.perfil = ""
         st.rerun()
 
-    # Carregamento prévio dos trabalhos para ambos os perfis (Avaliador e Admin)
+    # Carregamento da aba de Trabalhos
     try:
-        df_trabalhos_cadastrados = conn.read(worksheet="Trabalhos", ttl=60)
-        # Cria um mapeamento rápido de ID para Nome e Categoria
-        dict_trabalhos = df_trabalhos_cadastrados.set_index('id_trabalho').to_dict('index')
+        df_trabalhos_cadastrados = conn.read(worksheet="Trabalhos", ttl=10)
     except Exception as e:
         st.error(f"Erro ao carregar a lista de trabalhos da planilha: {e}")
-        dict_trabalhos = {}
+        df_trabalhos_cadastrados = pd.DataFrame()
 
     # -------------------------------------------------------------
-    # PERFIL: AVALIADOR (Formulário de Lançamento de Notas)
+    # PERFIL: AVALIADOR (Formulário com Dropdowns em Cascata)
     # -------------------------------------------------------------
     if st.session_state.perfil == "avaliador":
         st.title("📝 Lançamento de Notas")
-        st.write("Selecione o trabalho e atribua as notas inteiras (1 a 10).")
+        st.write("Filtre pela categoria e selecione o trabalho para avaliar.")
         
-        if not dict_trabalhos:
+        if df_trabalhos_cadastrados.empty:
             st.warning("Nenhum trabalho cadastrado na planilha para avaliação.")
         else:
+            # 1. Dropdown de Categoria (Fora do form para disparar a atualização dinâmica)
+            lista_categorias = sorted(df_trabalhos_cadastrados['categoria'].unique())
+            categoria_selecionada = st.selectbox("1️⃣ Escolha a Categoria do Trabalho:", options=lista_categorias)
+            
+            # Filtrar os trabalhos que pertencem à categoria selecionada
+            trabalhos_filtrados = df_trabalhos_cadastrados[df_trabalhos_cadastrados['categoria'] == categoria_selecionada]
+            dict_trabalhos_filtrados = trabalhos_filtrados.set_index('id_trabalho').to_dict('index')
+            
+            # 2. Formulário de Notas
             with st.form(key="form_notas", clear_on_submit=True):
-                # Caixa de seleção mostrando ID, Título e Categoria para o avaliador não errar
+                
+                # Dropdown de Trabalhos dependente da categoria
                 id_trabalho = st.selectbox(
-                    "Escolha o Trabalho:", 
-                    options=list(dict_trabalhos.keys()), 
-                    format_func=lambda x: f"{x} - {dict_trabalhos[x]['titulo_trabalho']} ({dict_trabalhos[x]['categoria']})"
+                    "2️⃣ Selecione o Trabalho:", 
+                    options=list(dict_trabalhos_filtrados.keys()), 
+                    format_func=lambda x: f"{x} - {dict_trabalhos_filtrados[x]['titulo_trabalho']}"
                 )
                 
-                # Mostra visualmente a categoria do trabalho selecionado fora da caixa
-                st.info(f"**Categoria do Trabalho Selecionado:** {dict_trabalhos[id_trabalho]['categoria']}")
                 st.divider()
-                
-                # Sliders configurados apenas para números inteiros (1 a 10)
+                # Sliders apenas inteiros (Corrigidos)
                 criterio_1 = st.slider("Inovação e Originalidade (1 a 10):", 1, 10, 5, step=1)
                 criterio_2 = st.slider("Fundamentação Científica (1 a 10):", 1, 10, 5, step=1)
                 criterio_3 = st.slider("Apresentação e Clareza (1 a 10):", 1, 10, 5, step=1)
@@ -96,16 +98,15 @@ else:
                 enviar_nota = st.form_submit_button("Submeter Avaliação")
                 
             if enviar_nota:
-                # Média final calculada (pode gerar float, arredondado a 2 casas)
-                nota_final = round((criterio_1 + criterion_2 + criterio_3) / 3, 2)
+                # CÁLCULO CORRIGIDO: criterio_2 corrigido aqui!
+                nota_final = round((criterio_1 + criterio_2 + criterio_3) / 3, 2)
                 
-                # Monta a linha incluindo a categoria correspondente do trabalho
                 nova_avaliacao = pd.DataFrame([{
                     "ID": str(int(datetime.timestamp(datetime.now()))),
                     "Avaliador": st.session_state.usuario,
                     "ID_Trabalho": id_trabalho,
-                    "Titulo_Trabalho": dict_trabalhos[id_trabalho]['titulo_trabalho'],
-                    "Categoria": dict_trabalhos[id_trabalho]['categoria'], # Salva a categoria junto com a nota
+                    "Titulo_Trabalho": dict_trabalhos_filtrados[id_trabalho]['titulo_trabalho'],
+                    "Categoria": categoria_selecionada, 
                     "Criterio_1": int(criterio_1),
                     "Criterio_2": int(criterio_2),
                     "Criterio_3": int(criterio_3),
@@ -125,66 +126,63 @@ else:
                     st.error(f"Erro ao salvar na planilha: {e}")
 
     # -------------------------------------------------------------
-    # PERFIL: ADMIN (Dashboard em Tempo Real com Filtro de Categoria)
+    # PERFIL: ADMIN (Dashboard Seguro contra colunas vazias)
     # -------------------------------------------------------------
     elif st.session_state.perfil == "admin":
         st.title("📊 Painel do Administrador - Tempo Real")
         st.write("Acompanhe o andamento e a premiação por categorias da feira de ciências.")
         
         try:
-            # Carrega os dados reais das avaliações
             df_notas = conn.read(worksheet="Avaliacoes", ttl=0)
             
-            if df_notas.empty or len(df_notas) == 0:
-                st.warning("Ainda não foram enviadas avaliações pelos jurados.")
+            # Trata o caso de a planilha estar totalmente vazia ou sem a coluna Categoria ainda
+            if df_notas.empty or "Categoria" not in df_notas.columns:
+                st.warning("Aguardando as primeiras avaliações serem inseridas para gerar o painel.")
             else:
-                # Garantir que os tipos numéricos estão corretos
                 df_notas["Nota_Final"] = pd.to_numeric(df_notas["Nota_Final"])
                 
-                # FILTRO DE CATEGORIA NO DASHBOARD
-                categorias_disponiveis = ["Todas"] + list(df_notas["Categoria"].unique())
+                # Filtro de categorias no topo do dashboard
+                categorias_disponiveis = ["Todas"] + list(df_notas["Categoria"].dropna().unique())
                 categoria_selecionada = st.selectbox("Filtrar Dashboard por Categoria (Para Premiação):", categorias_disponiveis)
                 
-                # Aplica o filtro se não for "Todas"
                 if categoria_selecionada != "Todas":
                     df_filtrado = df_notas[df_notas["Categoria"] == categoria_selecionada]
                 else:
                     df_filtrado = df_notas
                 
-                # Indicadores rápidos baseados no filtro selecionado
-                total_avaliacoes = len(df_filtrado)
-                trabalhos_avaliados = df_filtrado["ID_Trabalho"].nunique()
-                media_geral = round(df_filtrado["Nota_Final"].mean(), 2)
-                
-                col1, col2, col3 = st.columns(3)
-                col1.metric(f"Notas em '{categoria_selecionada}'", total_avaliacoes)
-                col2.metric(f"Trabalhos Avaliados", trabalhos_avaliados)
-                col3.metric(f"Média do Grupo", media_geral)
-                
-                st.divider()
-                
-                # Gráfico do Ranking (Média por trabalho) baseado na categoria filtrada
-                st.subheader(f"🏆 Ranking de Premiação - Categoria: {categoria_selecionada}")
-                
-                ranking = df_filtrado.groupby(["ID_Trabalho", "Titulo_Trabalho", "Categoria"])["Nota_Final"].mean().reset_index()
-                ranking = ranking.sort_values(by="Nota_Final", ascending=False)
-                
-                # Destaca os 3 primeiros lugares adicionando uma coluna visual se houver dados
-                ranking["Posição"] = range(1, len(ranking) + 1)
-                
-                fig = px.bar(ranking, x="Nota_Final", y="Titulo_Trabalho", orientation='h',
-                             text="Nota_Final", title=f"Classificação Atual ({categoria_selecionada})",
-                             labels={"Nota_Final": "Média das Notas", "Titulo_Trabalho": "Trabalho"},
-                             color="Nota_Final", color_continuous_scale="Blugrn")
-                fig.update_layout(yaxis={'categoryorder':'total ascending'})
-                st.plotly_chart(fig, use_container_width=True)
-                
-                st.divider()
-                
-                # Tabela detalhada com posições
-                st.subheader("📋 Tabela de Classificação Detalhada")
-                st.dataframe(ranking.set_index("Posição"), use_container_width=True)
-                
+                if df_filtrado.empty:
+                    st.info(f"Nenhum voto computado para a categoria '{categoria_selecionada}' até agora.")
+                else:
+                    # Indicadores
+                    total_avaliacoes = len(df_filtrado)
+                    trabalhos_avaliados = df_filtrado["ID_Trabalho"].nunique()
+                    media_geral = round(df_filtrado["Nota_Final"].mean(), 2)
+                    
+                    col1, col2, col3 = st.columns(3)
+                    col1.metric(f"Notas em '{categoria_selecionada}'", total_avaliacoes)
+                    col2.metric(f"Trabalhos Avaliados", trabalhos_avaliados)
+                    col3.metric(f"Média do Grupo", media_geral)
+                    
+                    st.divider()
+                    
+                    # Gráfico do Ranking
+                    st.subheader(f"🏆 Ranking de Premiação - Categoria: {categoria_selecionada}")
+                    ranking = df_filtrado.groupby(["ID_Trabalho", "Titulo_Trabalho", "Categoria"])["Nota_Final"].mean().reset_index()
+                    ranking = ranking.sort_values(by="Nota_Final", ascending=False)
+                    ranking["Posição"] = range(1, len(ranking) + 1)
+                    
+                    fig = px.bar(ranking, x="Nota_Final", y="Titulo_Trabalho", orientation='h',
+                                 text="Nota_Final", title=f"Classificação Atual ({categoria_selecionada})",
+                                 labels={"Nota_Final": "Média das Notas", "Titulo_Trabalho": "Trabalho"},
+                                 color="Nota_Final", color_continuous_scale="Blugrn")
+                    fig.update_layout(yaxis={'categoryorder':'total ascending'})
+                    st.plotly_chart(fig, use_container_width=True)
+                    
+                    st.divider()
+                    
+                    st.subheader("📋 Tabela de Classificação Detalhada")
+                    st.dataframe(ranking.set_index("Posição"), use_container_width=True)
+                    
                 st.divider()
                 st.subheader("⏱️ Últimos Votos Computados (Histórico Geral)")
                 st.dataframe(df_notas.sort_values(by="Data_Hora", ascending=False), use_container_width=True)
